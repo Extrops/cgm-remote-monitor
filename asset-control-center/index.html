@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en" data-theme="jarvis">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Asset Command Center</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="bg-grid" aria-hidden="true"></div>
+  <div class="scanline" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <div class="brand">
+      <div class="reactor" aria-hidden="true"><span></span><span></span><span></span></div>
+      <div>
+        <div class="brand-title">ASSET COMMAND</div>
+        <div class="brand-sub">Fleet · Estates · Logistics</div>
+      </div>
+    </div>
+    <form class="cmd" id="cmdForm" autocomplete="off">
+      <span class="cmd-prompt">&gt;_</span>
+      <input id="cmdInput" type="text" placeholder="Command: status · where is tender · find generator · help" aria-label="Command console">
+    </form>
+    <div class="top-right">
+      <div class="clock"><div id="clockTime">--:--:--</div><div id="clockDate" class="muted">STARDATE ----</div></div>
+      <button class="btn ghost" id="themeBtn" title="Switch interface theme">LCARS</button>
+    </div>
+  </header>
+
+  <nav class="tabs" id="tabs">
+    <button data-view="bridge" class="active">Bridge</button>
+    <button data-view="assets">Assets</button>
+    <button data-view="equipment">Equipment</button>
+    <button data-view="missions">Missions</button>
+    <button data-view="timeline">Timeline</button>
+    <button data-view="system">System</button>
+  </nav>
+
+  <main id="view" class="view"></main>
+
+  <div id="cmdOut" class="cmd-out hidden" role="status"></div>
+
+  <dialog id="modal" class="modal">
+    <form method="dialog" id="modalForm" class="panel">
+      <div class="panel-head"><h3 id="modalTitle">Edit</h3><button type="button" class="btn ghost sm" data-close>✕</button></div>
+      <div id="modalBody" class="modal-body"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn danger hidden" id="modalDelete">Decommission</button>
+        <span class="spacer"></span>
+        <button type="button" class="btn ghost" data-close>Cancel</button>
+        <button type="submit" class="btn primary" id="modalSave">Engage</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>
