@@ -299,3 +299,68 @@ td.num { font-family: Orbitron, sans-serif; font-size: 13px; }
   .brand { flex: 1; }
   .cmd { order: 3; flex-basis: 100%; }
 }
+
+/* ===== Maps (Leaflet) ===== */
+.map-host { height: 340px; border: 1px solid var(--line); border-radius: var(--radius); background: #050b12; }
+.map-host.full { height: calc(100vh - 260px); min-height: 420px; border: 0; }
+.map-panel { padding: 0; overflow: hidden; }
+.pick-map { height: 240px; border: 1px solid var(--line); border-radius: var(--radius); background: #050b12; }
+.leaflet-container { font-family: "Rajdhani", sans-serif; background: #050b12; }
+/* tint the dark basemap toward the HUD palette */
+[data-theme="jarvis"] .tiles-tactical { filter: sepia(.6) hue-rotate(150deg) saturate(2.2) brightness(1.15) contrast(1.05); }
+[data-theme="lcars"] .tiles-tactical { filter: sepia(.7) hue-rotate(-20deg) saturate(1.6) brightness(1.1); }
+.leaflet-control-zoom a, .leaflet-control-layers, .leaflet-bar a {
+  background: var(--panel-solid) !important; color: var(--primary) !important; border-color: var(--line) !important;
+}
+.leaflet-control-layers { border: 1px solid var(--line-strong) !important; color: var(--text) !important; border-radius: var(--radius) !important; }
+.leaflet-control-layers-expanded { padding: 8px 12px; font-size: 13px; }
+.leaflet-control-layers-separator { border-top-color: var(--line) !important; }
+.leaflet-control-layers-toggle { filter: invert(1) hue-rotate(180deg); }
+.leaflet-control-attribution { background: rgba(0,0,0,.6) !important; color: var(--muted) !important; font-size: 10px; }
+.leaflet-control-attribution a { color: var(--primary) !important; }
+.leaflet-control-scale-line { background: rgba(0,0,0,.5); color: var(--primary); border-color: var(--primary); }
+
+.hud-marker { position: relative; color: var(--primary); }
+.hud-marker.mission { color: var(--accent); }
+.hud-marker.conflict { color: var(--crit); }
+.hud-marker.s-maintenance { color: var(--warn); }
+.hud-marker.s-offline { color: var(--crit); }
+.hud-marker .hm-dot { position: absolute; inset: 3px; border-radius: 50%; background: currentColor; box-shadow: 0 0 8px currentColor, 0 0 16px currentColor; }
+.hud-marker.mission .hm-dot { border-radius: 0; transform: rotate(45deg); }
+.hud-marker .hm-ring { position: absolute; inset: -6px; border: 1.5px solid currentColor; border-radius: 50%; animation: ping 2.4s ease-out infinite; }
+.hud-tip { background: rgba(2, 10, 18, .85) !important; color: var(--text) !important; border: 1px solid var(--line) !important;
+  box-shadow: none !important; font-size: 12px; padding: 1px 6px !important; border-radius: var(--radius) !important; }
+.hud-tip.mission { color: var(--accent) !important; }
+.hud-tip::before { display: none; }
+.hud-popup .leaflet-popup-content-wrapper, .hud-popup .leaflet-popup-tip {
+  background: var(--panel-solid); color: var(--text); border: 1px solid var(--line-strong); box-shadow: var(--glow); border-radius: var(--radius);
+}
+.hud-popup a.leaflet-popup-close-button { color: var(--primary); }
+.map-pop { font-size: 14px; line-height: 1.35; }
+.map-pop .mp-title { font-family: Orbitron, sans-serif; color: var(--primary); font-size: 13px; letter-spacing: .06em; margin-bottom: 2px; }
+.map-pop .mp-sub { color: var(--muted); font-size: 12px; }
+.map-pop .mp-wx { margin: 6px 0; padding: 6px 8px; border-left: 2px solid var(--accent); background: rgba(0,0,0,.3); }
+.route-line { animation: dash 1.2s linear infinite; }
+@keyframes dash { to { stroke-dashoffset: -12; } }
+
+/* ===== Weather ===== */
+.wx { border-top: 1px solid var(--line); padding-top: 10px; }
+.wx-days { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; }
+.wx-day { flex: 0 0 74px; text-align: center; padding: 6px 4px; border: 1px solid var(--line); background: rgba(0,0,0,.3); border-radius: var(--radius); font-size: 12px; }
+.wx-date { font-family: Orbitron, sans-serif; font-size: 9px; color: var(--muted); letter-spacing: .08em; }
+.wx-icon { font-size: 22px; line-height: 1.3; }
+.wx-temp { font-family: Orbitron, sans-serif; font-size: 12px; margin-bottom: 2px; }
+.wx-line { font-size: 12px; white-space: nowrap; }
+.wx-note { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.wx-pill { display: inline-flex; align-items: center; gap: 6px; background: transparent; border: 1px solid var(--line); color: var(--muted);
+  font-family: Orbitron, sans-serif; font-size: 10px; letter-spacing: .12em; padding: 6px 10px; border-radius: var(--radius); cursor: pointer; }
+.wx-pill:hover { border-color: var(--line-strong); color: var(--text); }
+.wx-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.wx-pill.ok .wx-dot { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+.wx-pill.sync .wx-dot { background: var(--accent); animation: pulse 1s infinite; }
+.wx-pill.err .wx-dot { background: var(--warn); }
+@media (max-width: 600px) { .map-host.full { height: 70vh; } .wx-pill { display: none; } }
+.leaflet-control-layers label { display: block; margin: 3px 0; cursor: pointer; }
+.leaflet-control-layers label > span, .leaflet-control-layers label span { font-family: "Rajdhani", sans-serif; font-size: 14px; color: var(--text);
+  text-transform: none; letter-spacing: .02em; }
+.leaflet-control-layers input { width: auto; margin: 0 6px 0 0; accent-color: var(--primary); vertical-align: middle; }

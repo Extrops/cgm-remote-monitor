@@ -155,7 +155,7 @@
     state.log.unshift({ at: new Date().toISOString(), text: text });
     if (state.log.length > 300) state.log.length = 300;
   }
-  function commit(msg) { if (msg) log(msg); save(); render(); }
+  function commit(msg) { if (msg) log(msg); save(); render(); fetchWeather(); }
 
   // ---------------------------------------------------------------- logistics engine
   function assetName(id) { var a = byId(state.assets, id); return a ? a.name : 'Unassigned'; }
@@ -245,6 +245,8 @@
     state.equipment.forEach(function (e) {
       if (e.condition === 'damaged') alerts.push({ level: 'warn', kind: 'equipment', text: e.name + ' damaged', sub: 'At ' + assetName(e.assetId) });
     });
+
+    alerts = alerts.concat(weatherAlerts());
 
     // De-duplicate identical alerts
     var seen = {};
@@ -350,6 +352,299 @@
   }
   function niceStep(span) { return span > 120 ? 30 : span > 60 ? 15 : span > 25 ? 10 : span > 10 ? 5 : 2; }
 
+  // ---------------------------------------------------------------- weather (Open-Meteo, no API key)
+  var WX_KEY = STORAGE_KEY + '.wx';
+  var WX_TTL = 60 * 60000;            // refetch after 1 hour
+  var FORECAST_DAYS = 16;             // Open-Meteo forecast horizon
+  var WX_CODES = [
+    [[0], '☀', 'Clear'], [[1], '🌤', 'Mostly clear'], [[2], '⛅', 'Partly cloudy'], [[3], '☁', 'Overcast'],
+    [[45, 48], '🌫', 'Fog'], [[51, 53, 55, 56, 57], '🌦', 'Drizzle'], [[61, 63, 65, 66, 67], '🌧', 'Rain'],
+    [[71, 73, 75, 77], '❄', 'Snow'], [[80, 81, 82], '🌦', 'Showers'], [[85, 86], '🌨', 'Snow showers'], [[95, 96, 99], '⛈', 'Thunderstorm']
+  ];
+  var wx = loadWx();
+  var wxInflight = false;
+
+  function loadWx() {
+    try { var w = JSON.parse(localStorage.getItem(WX_KEY)); if (w && w.points) return w; } catch (e) { /* ignore */ }
+    return { at: 0, points: {} };
+  }
+  function saveWx() { try { localStorage.setItem(WX_KEY, JSON.stringify(wx)); } catch (e) { /* ignore */ } }
+  function wxCode(c) {
+    for (var i = 0; i < WX_CODES.length; i++) if (WX_CODES[i][0].indexOf(c) >= 0) return { icon: WX_CODES[i][1], label: WX_CODES[i][2] };
+    return { icon: '·', label: 'Unknown' };
+  }
+  function hasCoords(o) {
+    return o && o.lat !== '' && o.lat != null && o.lon !== '' && o.lon != null && isFinite(+o.lat) && isFinite(+o.lon);
+  }
+  function ptKey(lat, lon) { return (+lat).toFixed(2) + ',' + (+lon).toFixed(2); }
+  function isMarineMission(m) {
+    return m.assetIds.some(function (id) { var a = byId(state.assets, id); return a && a.type === 'yacht'; });
+  }
+  function toArr(x) { return Array.isArray(x) ? x : [x]; }
+  function getJson(url) {
+    return fetch(url).then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
+  }
+
+  /** Points we need weather for: every asset and every active mission target. */
+  function wxPoints() {
+    var pts = {}, marine = {};
+    state.assets.forEach(function (a) {
+      if (!hasCoords(a)) return;
+      var k = ptKey(a.lat, a.lon); pts[k] = [+a.lat, +a.lon];
+      if (a.type === 'yacht') marine[k] = pts[k];
+    });
+    activeMissions().forEach(function (m) {
+      if (!hasCoords(m)) return;
+      var k = ptKey(m.lat, m.lon); pts[k] = [+m.lat, +m.lon];
+      if (isMarineMission(m)) marine[k] = pts[k];
+    });
+    return { pts: pts, marine: marine };
+  }
+
+  function setWxStatus(st, text) {
+    var pill = $('#wxPill'); if (!pill) return;
+    pill.className = 'wx-pill ' + st;
+    $('#wxText').textContent = text;
+  }
+
+  function fetchWeather(force) {
+    if (wxInflight) return;
+    var p = wxPoints(), keys = Object.keys(p.pts);
+    if (!keys.length) return;
+    var missing = keys.some(function (k) { return !wx.points[k]; });
+    if (!force && !missing && Date.now() - wx.at < WX_TTL) return;
+    wxInflight = true;
+    setWxStatus('sync', 'WX SYNC…');
+    function coords(list) {
+      return 'latitude=' + list.map(function (k) { return p.pts[k][0]; }).join(',') +
+        '&longitude=' + list.map(function (k) { return p.pts[k][1]; }).join(',');
+    }
+    var fUrl = 'https://api.open-meteo.com/v1/forecast?' + coords(keys) +
+      '&current=temperature_2m,weather_code,wind_speed_10m,wind_gusts_10m' +
+      '&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max,wind_speed_10m_max,wind_gusts_10m_max' +
+      '&timezone=auto&forecast_days=' + FORECAST_DAYS;
+    var mKeys = Object.keys(p.marine);
+    var mUrl = mKeys.length ? 'https://marine-api.open-meteo.com/v1/marine?' + coords(mKeys) +
+      '&daily=wave_height_max&timezone=auto&forecast_days=' + FORECAST_DAYS : null;
+
+    Promise.all([getJson(fUrl), mUrl ? getJson(mUrl).catch(function () { return null; }) : null]).then(function (res) {
+      var points = {}, f = toArr(res[0]);
+      keys.forEach(function (k, i) {
+        var r = f[i]; if (!r || !r.daily) return;
+        var d = r.daily, days = {};
+        (d.time || []).forEach(function (t, j) {
+          days[t] = { code: d.weather_code[j], tmax: d.temperature_2m_max[j], tmin: d.temperature_2m_min[j],
+            precip: d.precipitation_sum[j], pop: d.precipitation_probability_max[j], wind: d.wind_speed_10m_max[j], gust: d.wind_gusts_10m_max[j], wave: null };
+        });
+        var c = r.current;
+        points[k] = { days: days, current: c ? { temp: c.temperature_2m, code: c.weather_code, wind: c.wind_speed_10m, gust: c.wind_gusts_10m } : null };
+      });
+      if (res[1]) toArr(res[1]).forEach(function (r, i) {
+        var k = mKeys[i]; if (!r || !r.daily || !points[k]) return;
+        r.daily.time.forEach(function (t, j) { if (points[k].days[t]) points[k].days[t].wave = r.daily.wave_height_max[j]; });
+      });
+      wx = { at: Date.now(), points: points };
+      saveWx();
+      setWxStatus('ok', 'WX ' + new Date().toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false }));
+    }).catch(function () {
+      setWxStatus('err', wx.at ? 'WX CACHED' : 'WX OFFLINE');
+    }).then(function () {
+      wxInflight = false;
+      refreshWeatherDom();
+    });
+  }
+
+  /** Forecast for the mission's dates at its target. */
+  function missionForecast(m) {
+    if (!hasCoords(m)) return { state: 'nocoords' };
+    var p = wx.points[ptKey(m.lat, m.lon)];
+    if (!p) return { state: 'pending' };
+    var dates = Object.keys(p.days).sort();
+    var days = dates.filter(function (d) { return d >= m.start && d <= m.end; }).map(function (d) {
+      var o = Object.assign({ date: d }, p.days[d]); return o;
+    });
+    if (days.length) return { state: 'ok', days: days, partial: m.end > dates[dates.length - 1], marine: isMarineMission(m) };
+    if (dates.length && m.start > dates[dates.length - 1]) {
+      return { state: 'later', from: iso(new Date(parse(m.start).getTime() - (FORECAST_DAYS - 1) * DAY)) };
+    }
+    return { state: 'none' };
+  }
+
+  function weatherAlerts() {
+    var out = [];
+    activeMissions().forEach(function (m) {
+      var f = missionForecast(m);
+      if (f.state !== 'ok') return;
+      function worst(key) {
+        var best = null;
+        f.days.forEach(function (d) { if (d[key] != null && (!best || d[key] > best[key])) best = d; });
+        return best;
+      }
+      var g = worst('gust');
+      if (g && g.gust >= 50) out.push({ level: g.gust >= 75 ? 'crit' : 'warn', kind: 'weather', missions: [m.id],
+        text: 'Wind gusts ' + Math.round(g.gust) + ' km/h forecast', sub: '"' + m.name + '" · ' + fmtShort(g.date) });
+      if (f.marine) {
+        var w = worst('wave');
+        if (w && w.wave >= 2.5) out.push({ level: w.wave >= 4 ? 'crit' : 'warn', kind: 'weather', missions: [m.id],
+          text: 'Waves ' + w.wave.toFixed(1) + ' m forecast', sub: '"' + m.name + '" · ' + fmtShort(w.date) });
+      }
+      var r = worst('precip');
+      if (r && r.precip >= 20) out.push({ level: 'warn', kind: 'weather', missions: [m.id],
+        text: 'Heavy precipitation ' + Math.round(r.precip) + ' mm', sub: '"' + m.name + '" · ' + fmtShort(r.date) });
+      var storm = f.days.filter(function (d) { return d.code >= 95; })[0];
+      if (storm) out.push({ level: 'warn', kind: 'weather', missions: [m.id], text: 'Thunderstorms forecast', sub: '"' + m.name + '" · ' + fmtShort(storm.date) });
+      var hot = worst('tmax'), cold = f.days.reduce(function (a, d) { return d.tmin != null && (!a || d.tmin < a.tmin) ? d : a; }, null);
+      if (hot && hot.tmax >= 40) out.push({ level: 'warn', kind: 'weather', missions: [m.id], text: 'Extreme heat ' + Math.round(hot.tmax) + '°C', sub: '"' + m.name + '" · ' + fmtShort(hot.date) });
+      if (cold && cold.tmin <= -15) out.push({ level: 'warn', kind: 'weather', missions: [m.id], text: 'Extreme cold ' + Math.round(cold.tmin) + '°C', sub: '"' + m.name + '" · ' + fmtShort(cold.date) });
+    });
+    return out;
+  }
+
+  function wxMissionHtml(m) {
+    var f = missionForecast(m);
+    var head = '<div class="panel-head" style="margin-bottom:6px"><h3>Target weather</h3><span class="spacer"></span>' +
+      '<span class="muted" style="font-size:11px">Open-Meteo</span></div>';
+    if (f.state === 'nocoords') return head + '<div class="wx-note">Set target coordinates (Edit → Locate) to get a forecast.</div>';
+    if (f.state === 'pending') return head + '<div class="wx-note">Awaiting weather link…</div>';
+    if (f.state === 'later') return head + '<div class="wx-note">Beyond the ' + FORECAST_DAYS + '-day forecast horizon. Forecast available from ' + fmtDate(f.from) + '.</div>';
+    if (f.state === 'none') return head + '<div class="wx-note">No forecast for these dates.</div>';
+    return head + '<div class="wx-days">' + f.days.map(function (d) {
+      var c = wxCode(d.code);
+      var gustCls = d.gust >= 75 ? 's-crit' : d.gust >= 50 ? 's-warn' : '';
+      var waveCls = d.wave >= 4 ? 's-crit' : d.wave >= 2.5 ? 's-warn' : '';
+      return '<div class="wx-day" title="' + esc(c.label) + '"><div class="wx-date">' + esc(fmtShort(d.date)) + '</div>' +
+        '<div class="wx-icon">' + c.icon + '</div>' +
+        '<div class="wx-temp">' + Math.round(d.tmax) + '° <span class="muted">' + Math.round(d.tmin) + '°</span></div>' +
+        '<div class="wx-line ' + gustCls + '">💨 ' + Math.round(d.gust) + '</div>' +
+        (f.marine && d.wave != null ? '<div class="wx-line ' + waveCls + '">🌊 ' + d.wave.toFixed(1) + 'm</div>' : '') +
+        '<div class="wx-line">💧 ' + (d.precip != null ? (+d.precip).toFixed(d.precip < 10 ? 1 : 0) : '–') + '</div></div>';
+    }).join('') + '</div>' + (f.partial ? '<div class="wx-note">Remaining days are beyond the forecast horizon.</div>' : '') +
+      '<div class="wx-note">Wind gusts km/h · precipitation mm' + (f.marine ? ' · max wave height' : '') + '</div>';
+  }
+
+  function wxAssetHtml(a) {
+    if (!hasCoords(a)) return '';
+    var p = wx.points[ptKey(a.lat, a.lon)];
+    if (!p || !p.current) return '<span class="muted">—</span>';
+    var c = p.current, code = wxCode(c.code), todayW = p.days[iso(today())];
+    return code.icon + ' ' + Math.round(c.temp) + '°C · ' + esc(code.label) + ' · wind ' + Math.round(c.wind) + ' km/h (gust ' + Math.round(c.gust) + ')' +
+      (a.type === 'yacht' && todayW && todayW.wave != null ? ' · waves ' + todayW.wave.toFixed(1) + ' m' : '');
+  }
+
+  function refreshWeatherDom() {
+    $$('[data-wx-mission]').forEach(function (el) { var m = byId(state.missions, el.getAttribute('data-wx-mission')); if (m) el.innerHTML = wxMissionHtml(m); });
+    $$('[data-wx-asset]').forEach(function (el) { var a = byId(state.assets, el.getAttribute('data-wx-asset')); if (a) el.innerHTML = wxAssetHtml(a); });
+    var al = $('#alertsPanel'); if (al) al.innerHTML = alertsPanelHtml();
+  }
+
+  // ---------------------------------------------------------------- maps (Leaflet, vendored)
+  var maps = [];
+  var pickMap = null;
+
+  function baseLayers() {
+    var attrOsm = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>';
+    return {
+      'Tactical': L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+        subdomains: 'abcd', maxZoom: 19, attribution: attrOsm + ' &copy; <a href="https://carto.com/attributions">CARTO</a>', className: 'tiles-tactical' }),
+      'Satellite': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+        maxZoom: 19, attribution: 'Imagery &copy; Esri' }),
+      'Street': L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: attrOsm })
+    };
+  }
+  function seamarks() {
+    return L.tileLayer('https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png', { maxZoom: 18, attribution: '&copy; <a href="https://www.openseamap.org">OpenSeaMap</a>' });
+  }
+  function hudIcon(kind, glyph) {
+    return L.divIcon({ className: 'hud-marker ' + kind, iconSize: [16, 16], iconAnchor: [8, 8], popupAnchor: [0, -8],
+      html: '<span class="hm-ring"></span><span class="hm-dot">' + (glyph || '') + '</span>' });
+  }
+  function assetPopup(a) {
+    var aboard = state.equipment.filter(function (e) { return e.assetId === a.id; }).length;
+    var w = wxAssetHtml(a);
+    return '<div class="map-pop"><div class="mp-title">' + esc(a.name) + '</div>' +
+      '<div class="mp-sub">' + esc(ASSET_TYPES[a.type] || a.type) + ' · ' + esc(ASSET_STATUS[a.status] ? ASSET_STATUS[a.status].label : a.status) + '</div>' +
+      '<div>' + esc(a.location || '') + '</div>' + (w ? '<div class="mp-wx">' + w + '</div>' : '') +
+      '<div class="mp-sub">' + aboard + ' equipment item' + (aboard === 1 ? '' : 's') + ' aboard</div>' +
+      '<div class="card-actions" style="margin-top:8px"><button class="btn sm" data-action="goto-asset" data-id="' + a.id + '">Open</button>' +
+      '<button class="btn sm accent" data-action="new-mission" data-asset="' + a.id + '">Plan mission</button></div></div>';
+  }
+  function missionPopup(m) {
+    var f = missionForecast(m), wxLine = '';
+    if (f.state === 'ok') {
+      var maxG = Math.max.apply(null, f.days.map(function (d) { return d.gust || 0; }));
+      var hi = Math.max.apply(null, f.days.map(function (d) { return d.tmax; })), lo = Math.min.apply(null, f.days.map(function (d) { return d.tmin; }));
+      var waves = f.marine ? Math.max.apply(null, f.days.map(function (d) { return d.wave || 0; })) : null;
+      wxLine = f.days.slice(0, 7).map(function (d) { return wxCode(d.code).icon; }).join(' ') + '<br>' + Math.round(lo) + '…' + Math.round(hi) + '°C · gusts ≤ ' + Math.round(maxG) + ' km/h' + (waves ? ' · waves ≤ ' + waves.toFixed(1) + ' m' : '');
+    } else if (f.state === 'later') wxLine = 'Forecast from ' + fmtShort(f.from);
+    return '<div class="map-pop"><div class="mp-title">◇ ' + esc(m.name) + '</div>' +
+      '<div class="mp-sub">' + fmtShort(m.start) + ' – ' + fmtShort(m.end) + ' · ' + esc(m.assetIds.map(assetName).join(', ')) + '</div>' +
+      '<div>' + esc(m.destination || '') + '</div>' + (wxLine ? '<div class="mp-wx">' + wxLine + '</div>' : '') +
+      '<div class="card-actions" style="margin-top:8px"><button class="btn sm" data-action="open-mission" data-id="' + m.id + '">Open mission</button></div></div>';
+  }
+
+  function buildMap(el, mode) {
+    if (!window.L) { el.classList.add('tracking'); el.innerHTML = trackingMap(mode === 'full' ? 520 : 320); return; }
+    var full = mode === 'full';
+    var map = L.map(el, { worldCopyJump: true, zoomControl: true, scrollWheelZoom: full });
+    var base = baseLayers();
+    base.Tactical.addTo(map);
+    var assetsL = L.layerGroup().addTo(map), missionsL = L.layerGroup().addTo(map), routesL = L.layerGroup().addTo(map);
+    var bounds = [];
+    state.assets.forEach(function (a) {
+      if (!hasCoords(a)) return;
+      var ll = [+a.lat, +a.lon]; bounds.push(ll);
+      L.marker(ll, { icon: hudIcon('asset s-' + a.status), title: a.name })
+        .bindTooltip(esc(a.name), { permanent: full, direction: 'right', offset: [10, 0], className: 'hud-tip' })
+        .bindPopup(function () { return assetPopup(a); }, { className: 'hud-popup', maxWidth: 280 })
+        .addTo(assetsL);
+    });
+    activeMissions().forEach(function (m) {
+      if (!hasCoords(m)) return;
+      var ll = [+m.lat, +m.lon]; bounds.push(ll);
+      var conflict = missionConflicts(m).length > 0;
+      L.marker(ll, { icon: hudIcon('mission' + (conflict ? ' conflict' : '')), title: m.name })
+        .bindTooltip('◇ ' + esc(m.name), { permanent: full, direction: 'right', offset: [10, 0], className: 'hud-tip mission' })
+        .bindPopup(function () { return missionPopup(m); }, { className: 'hud-popup', maxWidth: 300 })
+        .addTo(missionsL);
+      m.assetIds.forEach(function (id) {
+        var a = byId(state.assets, id);
+        if (!hasCoords(a)) return;
+        L.polyline([[+a.lat, +a.lon], ll], { color: conflict ? '#ff3b5c' : '#ffb000', weight: 1.5, dashArray: '6 6', opacity: .8, className: 'route-line' })
+          .bindTooltip(esc(a.name) + ' → ' + esc(m.name), { sticky: true, className: 'hud-tip' }).addTo(routesL);
+      });
+    });
+    L.control.layers(base, { 'Assets': assetsL, 'Missions': missionsL, 'Routes': routesL, 'Sea marks': seamarks() }, { collapsed: !full }).addTo(map);
+    L.control.scale({ imperial: false }).addTo(map);
+    if (bounds.length) map.fitBounds(bounds, { padding: [40, 40], maxZoom: 9 });
+    else map.setView([45, 10], 4);
+    maps.push(map);
+  }
+  function destroyMaps() { maps.forEach(function (m) { m.remove(); }); maps = []; }
+  function mountMaps() { $$('[data-map]').forEach(function (el) { buildMap(el, el.getAttribute('data-map')); }); }
+
+  // ---------------------------------------------------------------- geocoding (Open-Meteo)
+  function geocode(text) {
+    var raw = String(text || '').split(/→|->|—/).pop().trim();
+    if (!raw) return Promise.reject(new Error('Nothing to search for'));
+    var parts = raw.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+    var candidates = [raw].concat(parts, parts.length ? parts[0].split(/\s+/).reverse() : []);
+    var seen = {};
+    candidates = candidates.filter(function (c) { if (c.length < 2 || seen[c]) return false; seen[c] = 1; return true; });
+    var i = 0;
+    function next() {
+      if (i >= candidates.length) return Promise.reject(new Error('No match for "' + raw + '"'));
+      var q = candidates[i++];
+      return getJson('https://geocoding-api.open-meteo.com/v1/search?count=1&format=json&name=' + encodeURIComponent(q)).then(function (r) {
+        if (r && r.results && r.results.length) {
+          var g = r.results[0];
+          return { lat: g.latitude, lon: g.longitude, label: [g.name, g.admin1, g.country].filter(Boolean).join(', ') };
+        }
+        return next();
+      });
+    }
+    return next();
+  }
+
   // ---------------------------------------------------------------- views
   var views = {};
 
@@ -372,16 +667,13 @@
 
     html += '<div class="grid g-bridge">';
     html += '<div class="grid" style="align-content:start">';
-    html += '<section class="panel"><div class="panel-head"><h2>Tactical overview</h2><span class="spacer"></span><span class="muted" style="font-size:12px">● assets &nbsp; <span style="color:var(--accent)">●</span> mission targets</span></div><div class="tracking">' + trackingMap(320) + '</div></section>';
+    html += '<section class="panel"><div class="panel-head"><h2>Tactical overview</h2><span class="spacer"></span><span class="muted" style="font-size:12px">● assets &nbsp; <span style="color:var(--accent)">●</span> mission targets</span></div><div class="map-host" data-map="mini"></div></section>';
     html += '<section class="panel"><div class="panel-head"><h2>Mission queue</h2><span class="spacer"></span><button class="btn sm" data-action="new-mission">+ New mission</button></div><div class="list">' +
       (ms.length ? ms.slice(0, 6).map(missionRow).join('') : '<div class="empty">No missions in the queue.</div>') + '</div></section>';
     html += '</div>';
 
     html += '<div class="grid" style="align-content:start">';
-    html += '<section class="panel"><div class="panel-head"><h2>Logistics alerts</h2><span class="spacer"></span>' +
-      (crit ? '<span class="badge s-crit">' + crit + ' critical</span>' : '<span class="badge s-ok">nominal</span>') + '</div><div class="list">' +
-      (alerts.length ? alerts.slice(0, 12).map(alertHtml).join('') + (alerts.length > 12 ? '<div class="muted">+' + (alerts.length - 12) + ' more</div>' : '') : '<div class="empty">All systems nominal.</div>') +
-      '</div></section>';
+    html += '<section class="panel" id="alertsPanel">' + alertsPanelHtml() + '</section>';
     html += '<section class="panel"><div class="panel-head"><h2>Fleet status</h2></div><div class="list">' +
       state.assets.map(function (a) {
         return '<div class="mission-row" data-action="goto-asset" data-id="' + a.id + '"><div class="asset-icon" style="width:36px;height:36px">' + (ICONS[a.type] || ICONS.other) + '</div>' +
@@ -390,6 +682,13 @@
     html += '</div></div>';
     return html;
   };
+  function alertsPanelHtml() {
+    var alerts = analyse(), crit = alerts.filter(function (a) { return a.level === 'crit'; }).length;
+    return '<div class="panel-head"><h2>Logistics alerts</h2><span class="spacer"></span>' +
+      (crit ? '<span class="badge s-crit">' + crit + ' critical</span>' : '<span class="badge s-ok">nominal</span>') + '</div><div class="list">' +
+      (alerts.length ? alerts.slice(0, 12).map(alertHtml).join('') + (alerts.length > 12 ? '<div class="muted">+' + (alerts.length - 12) + ' more</div>' : '') : '<div class="empty">All systems nominal.</div>') +
+      '</div>';
+  }
   function stat(label, val, sub, cls) {
     return '<div class="panel stat"><div class="stat-label">' + esc(label) + '</div><div class="stat-val ' + (cls || '') + '">' + esc(val) + '</div><div class="stat-sub">' + esc(sub) + '</div></div>';
   }
@@ -422,6 +721,7 @@
       '<div style="margin-top:4px">' + badge(ASSET_STATUS, a.status) + '</div></div></div>' +
       (gauges ? '<div class="gauges">' + gauges + '</div>' : '') +
       '<dl class="kv"><dt>Location</dt><dd>' + esc(a.location || '—') + '</dd>' +
+      (hasCoords(a) ? '<dt>Weather</dt><dd data-wx-asset="' + a.id + '">' + wxAssetHtml(a) + '</dd>' : '') +
       '<dt>Service</dt><dd class="' + (sd != null && sd < 0 ? 's-crit' : sd != null && sd <= 14 ? 's-warn' : '') + '">' + fmtDate(a.nextService) + (sd != null ? ' (' + (sd < 0 ? Math.abs(sd) + 'd overdue' : 'in ' + sd + 'd') + ')' : '') + '</dd>' +
       '<dt>Next mission</dt><dd>' + (next ? '<a href="#" data-action="open-mission" data-id="' + next.id + '" style="color:var(--accent)">' + esc(next.name) + '</a> · ' + fmtShort(next.start) : '—') + '</dd>' +
       '<dt>Aboard</dt><dd>' + (onboard.length ? onboard.map(function (e) { return '<span class="chip">' + esc(e.name) + (e.qty > 1 ? ' ×' + e.qty : '') + '</span>'; }).join('') : '<span class="muted">nothing</span>') + '</dd></dl>' +
@@ -486,6 +786,7 @@
       html += '<div class="list">' + conflicts.map(function (o) { return alertHtml({ level: 'crit', text: 'Resource conflict with "' + o.name + '"', sub: fmtShort(o.start) + ' – ' + fmtShort(o.end), missions: [o.id] }); }).join('') +
         transfers.map(function (t) { return alertHtml({ level: 'warn', text: 'Move ' + t.equipment.name, sub: assetName(t.equipment.assetId) + ' → ' + assetName(t.to) }); }).join('') + '</div>';
     }
+    if (m.status !== 'complete' && m.status !== 'cancelled') html += '<div class="wx" data-wx-mission="' + m.id + '">' + wxMissionHtml(m) + '</div>';
     if (m.checklist && m.checklist.length) {
       html += '<div><div class="panel-head" style="margin-bottom:6px"><h3>Pre-launch checklist</h3><span class="spacer"></span><span class="muted">' + checklistProgress(m) + '%</span></div>' +
         '<div class="progress" style="margin-bottom:8px"><div style="width:' + checklistProgress(m) + '%"></div></div><ul class="checklist">' +
@@ -538,6 +839,14 @@
     return html;
   };
 
+  views.map = function () {
+    return '<div class="section-head"><h2>Global tracking</h2><span class="spacer"></span><div class="filters">' +
+      '<button class="btn" data-action="wx-refresh">Refresh weather</button>' +
+      '<button class="btn primary" data-action="new-mission">+ New mission</button></div></div>' +
+      '<section class="panel map-panel"><div class="map-host full" data-map="full"></div></section>' +
+      '<p class="muted" style="font-size:13px">Click a marker for status and weather. Switch between Tactical, Satellite and Street maps, or add the OpenSeaMap sea-marks overlay, from the layer control (top right). Dashed lines run from each asset to its mission target.</p>';
+  };
+
   views.system = function () {
     var html = '<div class="section-head"><h2>System</h2></div><div class="grid g-bridge">';
     html += '<section class="panel"><div class="panel-head"><h2>Data core</h2></div>' +
@@ -557,7 +866,9 @@
   // ---------------------------------------------------------------- render
   function render() {
     var el = $('#view');
+    destroyMaps();
     el.innerHTML = views[ui.view]();
+    mountMaps();
     $$('#tabs button').forEach(function (b) { b.classList.toggle('active', b.getAttribute('data-view') === ui.view); });
   }
   function go(view, focusId) {
@@ -581,6 +892,12 @@
       }).join('') + '</select></label>';
     }
     if (f.type === 'textarea') return lab + '<textarea id="' + id + '" name="' + f.key + '" placeholder="' + esc(f.placeholder || '') + '">' + esc(val) + '</textarea></label>';
+    if (f.type === 'geo') {
+      return '<div class="full geo-field"><div class="panel-head" style="margin-bottom:6px">' +
+        '<button type="button" class="btn sm accent" id="geoBtn">⌖ Locate from ' + esc(f.sourceLabel) + '</button>' +
+        '<span class="muted" id="geoStatus" style="font-size:13px">or click / drag on the map</span></div>' +
+        '<div id="pickMap" class="pick-map"></div></div>';
+    }
     if (f.type === 'multi') {
       val = val || [];
       return '<div class="full"><label><span>' + esc(f.label) + '</span></label><div class="transfer-pick">' + f.options.map(function (o) {
@@ -599,8 +916,48 @@
     $('#modalDelete').classList.toggle('hidden', !opts.onDelete);
     $('#modalSave').textContent = opts.saveLabel || 'Engage';
     modal.showModal();
+    var geo = opts.fields.filter(function (f) { return f.type === 'geo'; })[0];
+    if (geo) initPickMap(geo.source);
     var first = $('#modalBody input, #modalBody select'); if (first) first.focus();
   }
+  function initPickMap(srcKey) {
+    var host = $('#pickMap'), latEl = $('#f-lat'), lonEl = $('#f-lon'), status = $('#geoStatus');
+    var marker = null;
+    function setInputs(lat, lon) {
+      latEl.value = lat.toFixed(4);
+      lonEl.value = ((((lon + 180) % 360) + 360) % 360 - 180).toFixed(4);
+    }
+    function place(lat, lon, pan) {
+      if (!pickMap) return;
+      if (!marker) {
+        marker = L.marker([lat, lon], { draggable: true, icon: hudIcon('mission') }).addTo(pickMap);
+        marker.on('dragend', function () { var p = marker.getLatLng(); setInputs(p.lat, p.lng); });
+      } else marker.setLatLng([lat, lon]);
+      if (pan) pickMap.setView([lat, lon], Math.max(pickMap.getZoom() || 0, 9));
+    }
+    $('#geoBtn').addEventListener('click', function () {
+      var src = $('#modalBody [name="' + srcKey + '"]');
+      status.textContent = 'Scanning…'; status.className = 'muted';
+      geocode(src ? src.value : '').then(function (g) {
+        setInputs(g.lat, g.lon); place(g.lat, g.lon, true);
+        status.textContent = 'Locked: ' + g.label; status.className = 's-ok';
+      }).catch(function (e) { status.textContent = e.message || 'Geocoding unavailable'; status.className = 's-warn'; });
+    });
+    if (!window.L) { host.classList.add('hidden'); return; }
+    pickMap = L.map(host, { worldCopyJump: true });
+    baseLayers().Tactical.addTo(pickMap);
+    if (latEl.value !== '' && lonEl.value !== '') { pickMap.setView([+latEl.value, +lonEl.value], 9); place(+latEl.value, +lonEl.value); }
+    else pickMap.setView([45, 10], 3);
+    pickMap.on('click', function (e) { setInputs(e.latlng.lat, e.latlng.lng); place(+latEl.value, +lonEl.value); });
+    [latEl, lonEl].forEach(function (el) {
+      el.addEventListener('change', function () {
+        if (latEl.value !== '' && lonEl.value !== '' && isFinite(+latEl.value) && isFinite(+lonEl.value)) place(+latEl.value, +lonEl.value, true);
+      });
+    });
+    setTimeout(function () { if (pickMap) pickMap.invalidateSize(); }, 60);
+  }
+  modal.addEventListener('close', function () { if (pickMap) { pickMap.remove(); pickMap = null; } });
+
   function readForm(fields) {
     var out = {}, body = $('#modalBody');
     fields.forEach(function (f) {
@@ -640,6 +997,7 @@
       { key: 'location', label: 'Location', full: true, placeholder: 'Marina, city, country' },
       { key: 'lat', label: 'Latitude', type: 'number', step: 'any', placeholder: '43.50' },
       { key: 'lon', label: 'Longitude', type: 'number', step: 'any', placeholder: '16.44' },
+      { key: '_geo', type: 'geo', source: 'location', sourceLabel: 'location' },
       { key: 'fuel', label: 'Fuel / heating %', type: 'number', min: 0, max: 100 },
       { key: 'battery', label: 'Battery / storage %', type: 'number', min: 0, max: 100 },
       { key: 'water', label: 'Water %', type: 'number', min: 0, max: 100 },
@@ -704,6 +1062,7 @@
       { key: 'destination', label: 'Route / destination', full: true },
       { key: 'lat', label: 'Target latitude', type: 'number', step: 'any' },
       { key: 'lon', label: 'Target longitude', type: 'number', step: 'any' },
+      { key: '_geo', type: 'geo', source: 'destination', sourceLabel: 'route (last stop)' },
       { key: 'assetIds', label: 'Assets deployed (first = equipment destination)', type: 'multi', options: assetOptions(false) },
       { key: 'equipmentIds', label: 'Equipment load-out', type: 'multi', options: state.equipment.slice().sort(function (a, b) { return a.name.localeCompare(b.name); }).map(function (e) { return [e.id, e.name + ' · ' + assetName(e.assetId)]; }) },
       { key: 'checklist', label: 'Checklist (one item per line, prefix [x] when done)', type: 'textarea', full: true },
@@ -769,7 +1128,7 @@
     if (lc === 'help' || lc === '?') {
       return toast('COMMAND REFERENCE', '<dl class="kv">' +
         '<dt>status</dt><dd>Fleet &amp; alert summary</dd><dt>where is &lt;item&gt;</dt><dd>Locate equipment</dd>' +
-        '<dt>find &lt;text&gt;</dt><dd>Search everything</dd><dt>go &lt;view&gt;</dt><dd>bridge, assets, equipment, missions, timeline, system</dd>' +
+        '<dt>find &lt;text&gt;</dt><dd>Search everything</dd><dt>go &lt;view&gt;</dt><dd>bridge, map, assets, equipment, missions, timeline, system</dd><dt>weather</dt><dd>Mission weather briefing</dd>' +
         '<dt>new mission|asset|item</dt><dd>Open a form</dd><dt>red alert</dt><dd>Show critical alerts</dd></dl>', true);
     }
     if (lc === 'status' || lc === 'report') {
@@ -778,6 +1137,13 @@
       return toast('STATUS REPORT', '<p>' + state.assets.length + ' assets, ' + state.equipment.length + ' equipment items, ' + activeMissions().length + ' active missions.</p>' +
         '<p>' + (al.length ? '<span class="s-' + (c ? 'crit' : 'warn') + '">' + al.length + ' alerts (' + c + ' critical).</span>' : '<span class="s-ok">All systems nominal.</span>') + '</p>' +
         (next ? '<p>Next mission: <b>' + esc(next.name) + '</b>, launching ' + fmtDate(next.start) + '.</p>' : ''), true);
+    }
+    if (lc === 'weather' || lc === 'wx' || lc === 'forecast') {
+      fetchWeather();
+      var ms = activeMissions().sort(function (a, b) { return a.start < b.start ? -1 : 1; });
+      var wa = weatherAlerts();
+      return toast('WEATHER BRIEFING', (wa.length ? '<div class="list" style="margin-bottom:10px">' + wa.map(alertHtml).join('') + '</div>' : '<p class="s-ok">No adverse weather on mission dates.</p>') +
+        ms.map(function (m) { return '<div style="margin-bottom:10px"><div class="a-text">' + esc(m.name) + '</div>' + wxMissionHtml(m).replace(/<div class="panel-head".*?<\/div>/, '') + '</div>'; }).join(''), true);
     }
     if (lc === 'red alert' || lc === 'alerts') {
       var crit = analyse().filter(function (a) { return a.level === 'crit'; });
@@ -852,6 +1218,7 @@
         if (st === 'complete') m2.assetIds.forEach(function (aid) { var as = byId(state.assets, aid); if (as && as.status === 'deployed') as.status = 'operational'; });
         commit('Mission ' + (st === 'active' ? 'launched' : 'completed') + ': ' + m2.name); break;
       }
+      case 'wx-refresh': fetchWeather(true); break;
       case 'close-toast': $('#cmdOut').classList.add('hidden'); break;
       case 'export': {
         var blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
@@ -920,6 +1287,11 @@
   }
   setInterval(tick, 1000); tick();
 
+  $('#wxPill').addEventListener('click', function () { fetchWeather(true); });
+  if (wx.at) setWxStatus(Date.now() - wx.at < WX_TTL ? 'ok' : 'err', 'WX ' + new Date(wx.at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false }));
+  setInterval(fetchWeather, 10 * 60000);
+
   save();
   render();
+  fetchWeather();
 })();
